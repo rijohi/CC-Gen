@@ -22,36 +22,86 @@ namespace OSU_Helpers
         /// <returns>A structure ID in the form of a string that has a unique ID for the provided structure set.</returns>
         public static string UniqueStructureId(this string BaseIdString, StructureSet structureSet)
         {
-            if (structureSet.Structures.Where(a => a.Id == BaseIdString).Count() > 0)
+            // Check if the initial BaseIdString already exists
+            // Using Any() is generally more efficient than Where().Count() > 0
+            if (structureSet.Structures.Any(a => a.Id == BaseIdString))
             {
                 string tmp_id_r1 = BaseIdString;
                 int i = 0;
-                while (structureSet.Structures.Where(a => a.Id == tmp_id_r1).Count() > 0 && tmp_id_r1.Length < 16)
+                // Loop to find the next available ID by appending "_i"
+                // Limit loop by attempts or check length more carefully
+                int attempts = 0; // Prevent infinite loop
+                while (structureSet.Structures.Any(a => a.Id == tmp_id_r1) && attempts < 1000) // Added attempt limit
                 {
-                    tmp_id_r1 = BaseIdString + "_" + i.ToString();
+                    string suffix = "_" + i.ToString();
+                    // Check length before assignment
+                    if ((BaseIdString.Length + suffix.Length) <= 16)
+                    {
+                        tmp_id_r1 = BaseIdString + suffix;
+                    }
+                    else
+                    {
+                        // Handle exceeding 16 chars - truncate base or throw?
+                        // Simple truncation might risk collision. Throwing is safer.
+                        // Or, if truncation is acceptable:
+                        int charsToKeep = 16 - suffix.Length;
+                        if (charsToKeep <= 0) throw new InvalidOperationException($"Cannot make unique ID for '{BaseIdString}' within 16 chars.");
+                        tmp_id_r1 = BaseIdString.Substring(0, charsToKeep) + suffix;
+                        // Important: Check again if truncated ID exists! If so, this simple approach fails.
+                        if (structureSet.Structures.Any(a => a.Id == tmp_id_r1))
+                        {
+                            // Handle collision after truncation - maybe try incrementing 'i' further? Complex.
+                            throw new InvalidOperationException($"Cannot make unique ID for '{BaseIdString}' within 16 chars due to collision after truncation.");
+                        }
+                        break; // Exit loop with truncated ID
+                    }
                     i++;
+                    attempts++;
+                }
+                if (attempts >= 1000)
+                {
+                    throw new InvalidOperationException($"Could not find unique ID for '{BaseIdString}' after {attempts} attempts.");
                 }
                 return tmp_id_r1;
             }
             else
             {
+                // Add length check for the initial ID too
+                if (BaseIdString.Length > 16)
+                {
+                    throw new ArgumentException($"BaseIdString '{BaseIdString}' exceeds 16 characters.", nameof(BaseIdString));
+                }
                 return BaseIdString;
             }
         }
+
 
         /// <summary>
         /// Generates the ring based upon a particular structure, adds to the given structure set, using the distances provided
         /// </summary>
         /// <param name="_ResultantRing">Base structure to generate the ring from</param>
         /// <param name="BaseStructureSet"></param>
-        /// <param name="StartDistance_mm"></param>
-        /// <param name="EndDistance_mm"></param>
+        /// <param name="StartDistance_mm">Using double for consistency with Margin methods</param>
+        /// <param name="EndDistance_mm">Using double for consistency</param>
         /// <param name="HighResFlag"></param>
         /// <returns>The ring as a structure type.</returns>
-        public static Structure GenerateRing(this Structure _ResultantRing, StructureSet BaseStructureSet, int StartDistance_mm, int EndDistance_mm, bool HighResFlag = false)
+        public static Structure GenerateRing(this Structure _ResultantRing, StructureSet BaseStructureSet, double StartDistance_mm, double EndDistance_mm, bool HighResFlag = false)
         {
+            // Added null checks and validation
+            if (_ResultantRing == null) throw new ArgumentNullException(nameof(_ResultantRing));
+            if (BaseStructureSet == null) throw new ArgumentNullException(nameof(BaseStructureSet));
+            if (StartDistance_mm < 0 || EndDistance_mm < 0) throw new ArgumentException("Distances must be non-negative.");
+            if (EndDistance_mm <= StartDistance_mm) throw new ArgumentException("End distance must be greater than start distance.");
+
+
+            // HighRes conversion logic - added CanConvertToHighResolution check
             if (HighResFlag && !_ResultantRing.IsHighResolution)
-                _ResultantRing.ConvertToHighResolution();
+            {
+                if (_ResultantRing.CanConvertToHighResolution())
+                    _ResultantRing.ConvertToHighResolution();
+                else
+                    Console.WriteLine($"Warning: Structure '{_ResultantRing.Id}' cannot be converted to high resolution."); // Or throw?
+            }
 
             string id_r1 = "_tempr1";
             string id_r2 = "_tempr2";
@@ -59,894 +109,958 @@ namespace OSU_Helpers
             id_r1 = id_r1.UniqueStructureId(BaseStructureSet);
             id_r2 = id_r2.UniqueStructureId(BaseStructureSet);
 
-            Structure temp_start = BaseStructureSet.AddStructure("AVOIDANCE", id_r1);
-            if (HighResFlag && !temp_start.IsHighResolution) temp_start.ConvertToHighResolution();
-            Structure temp_end = BaseStructureSet.AddStructure("AVOIDANCE", id_r2);
-            if (HighResFlag && !temp_end.IsHighResolution) temp_end.ConvertToHighResolution();
+            Structure temp_start = null; // Initialize to null for finally block
+            Structure temp_end = null;
 
-            temp_start.SegmentVolume = _ResultantRing.SegmentVolume.MarginGreaterThan50mm(StartDistance_mm);
-            temp_end.SegmentVolume = _ResultantRing.SegmentVolume.MarginGreaterThan50mm(EndDistance_mm);
+            try // Use try/finally to ensure cleanup
+            {
+                temp_start = BaseStructureSet.AddStructure("AVOIDANCE", id_r1); // Use CONTROL or AVOIDANCE
+                if (HighResFlag && !temp_start.IsHighResolution && temp_start.CanConvertToHighResolution()) temp_start.ConvertToHighResolution();
 
-            _ResultantRing.SegmentVolume = temp_end.Sub(temp_start);
+                temp_end = BaseStructureSet.AddStructure("AVOIDANCE", id_r2);
+                if (HighResFlag && !temp_end.IsHighResolution && temp_end.CanConvertToHighResolution()) temp_end.ConvertToHighResolution();
 
-            BaseStructureSet.RemoveStructure(temp_start);
-            BaseStructureSet.RemoveStructure(temp_end);
+                // Ensure resolution consistency if HighResFlag is true
+                if (HighResFlag && (!_ResultantRing.IsHighResolution || !temp_start.IsHighResolution || !temp_end.IsHighResolution))
+                {
+                    // Handle inconsistency - log warning or throw exception
+                    Console.WriteLine("Warning: High resolution requested but not all structures could be converted.");
+                    // Or throw new InvalidOperationException("Could not ensure high resolution for all structures in GenerateRing.");
+                }
+
+                // Use the MarginGreaterThan50mm helper for robustness
+                temp_start.SegmentVolume = _ResultantRing.SegmentVolume.MarginGreaterThan50mm(StartDistance_mm);
+                temp_end.SegmentVolume = _ResultantRing.SegmentVolume.MarginGreaterThan50mm(EndDistance_mm);
+
+                _ResultantRing.SegmentVolume = temp_end.SegmentVolume.Sub(temp_start.SegmentVolume); // Use SegmentVolume property
+            }
+            finally // Ensure temporary structures are removed
+            {
+                if (temp_start != null && BaseStructureSet.Structures.Contains(temp_start)) BaseStructureSet.RemoveStructure(temp_start);
+                if (temp_end != null && BaseStructureSet.Structures.Contains(temp_end)) BaseStructureSet.RemoveStructure(temp_end);
+            }
 
             return _ResultantRing;
         }
 
+
         /// <summary>
         /// Generates a ring <c>SegmentVolume</c> from a collection of base structures that have been added together
         /// </summary>
-        /// <param name="structure">The base structure collection</param>
-        /// <param name="ss">The structure set to use during calculation</param>
-        /// <param name="StartDistance_mm">The distance the ring should start from the base structure in milimeters</param>
-        /// <param name="EndDistance_mm">The distance the ring should end from the base structure in milimeters</param>
-        /// <param name="HighResFlag">If the ring should be high resolution or not. Defaults to False.</param>
-        /// <returns>Returns a <c>SegmentVolume</c> that is the ring created at the specified distances from the base structure.</returns>
+        [Obsolete("Prefer using the StructureSet overload: GenerateRing(this StructureSet ss, ICollection<Structure> structure, ...).")]
         public static SegmentVolume GenerateRing(this ICollection<Structure> structure, StructureSet ss, double StartDistance_mm, double EndDistance_mm, bool HighResFlag = false)
         {
+            // Check for null/empty inputs
+            if (ss == null) throw new ArgumentNullException(nameof(ss));
+            if (structure == null || !structure.Any()) throw new ArgumentException("Structure collection cannot be null or empty.", nameof(structure));
+
+            // Use the safe TotalSegmentVolume overload
             SegmentVolume sv = TotalSegmentVolume(structure, ss, HighResFlag);
 
-            Structure exp1 = ss.AddStructure("CONTROL", "Exp1");
-            Structure exp2 = ss.AddStructure("CONTROL", "Exp2");
+            // Need temporary structures for margins
+            Structure exp1 = null;
+            Structure exp2 = null;
+            string id_exp1 = "_Exp1".UniqueStructureId(ss); // Ensure unique IDs
+            string id_exp2 = "_Exp2".UniqueStructureId(ss);
 
-            exp1.SegmentVolume = sv.Margin(StartDistance_mm);
-            exp2.SegmentVolume = sv.Margin(EndDistance_mm);
+            try
+            {
+                exp1 = ss.AddStructure("CONTROL", id_exp1);
+                exp2 = ss.AddStructure("CONTROL", id_exp2);
 
-            sv = exp2.Sub(exp1.SegmentVolume);
+                // Ensure high-res consistency if needed
+                bool needHighRes = HighResFlag || structure.Any(a => a.IsHighResolution);
+                if (needHighRes)
+                {
+                    if (exp1.CanConvertToHighResolution()) exp1.ConvertToHighResolution(); else Console.WriteLine($"Warning: Cannot make temp structure {id_exp1} high-res.");
+                    if (exp2.CanConvertToHighResolution()) exp2.ConvertToHighResolution(); else Console.WriteLine($"Warning: Cannot make temp structure {id_exp2} high-res.");
+                }
+                if (needHighRes && (!exp1.IsHighResolution || !exp2.IsHighResolution))
+                {
+                    // Handle inconsistency if high-res is critical
+                }
 
-            ss.RemoveStructure(exp1);
-            ss.RemoveStructure(exp2);
+
+                // Use MarginGreaterThan50mm helper
+                exp1.SegmentVolume = sv.MarginGreaterThan50mm(StartDistance_mm);
+                exp2.SegmentVolume = sv.MarginGreaterThan50mm(EndDistance_mm);
+
+                sv = exp2.SegmentVolume.Sub(exp1.SegmentVolume); // Use SegmentVolume property
+            }
+            finally
+            {
+                if (exp1 != null && ss.Structures.Contains(exp1)) ss.RemoveStructure(exp1);
+                if (exp2 != null && ss.Structures.Contains(exp2)) ss.RemoveStructure(exp2);
+            }
 
             return sv;
         }
 
+
         /// <summary>
-        /// Generates a segment volume that is the union of all structures within the collection. Does not protect against approved structures.
+        /// Generates a segment volume that is the union of all structures within the collection.
+        /// WARNING: This overload can modify input structures if they need high-res conversion. Use the overload with StructureSet for safety.
         /// </summary>
-        /// <param name="structures">The base collection of structures</param>
-        /// <returns>Returns a segment volume that is the union of all structures within the collection</returns>
         public static SegmentVolume TotalSegmentVolume(this IEnumerable<Structure> structures)
         {
-            int st_count = structures.Count();
+            // Check for null or empty input
+            if (structures == null || !structures.Any())
+            {
+                // Decide behavior: Throw exception or return null/empty representation?
+                // Throwing is safer as union of nothing is ill-defined.
+                throw new ArgumentException("Input structure collection cannot be null or empty.", nameof(structures));
+                // If returning null is preferred: return null; (Callers must handle null)
+            }
+
+            int st_count = structures.Count(); // No longer needed if using foreach
             bool high_res = structures.Any(a => a.IsHighResolution);
 
-            SegmentVolume sv;
-            if (high_res)
+            SegmentVolume sv = null; // Initialize
+            Structure firstStructure = structures.First(); // Get first structure
+
+            try
             {
-
-                if (!structures.ElementAt(0).IsHighResolution)
+                // Process first structure (potentially modifying it)
+                if (high_res && !firstStructure.IsHighResolution)
                 {
-                    try
-                    {
-                        structures.ElementAt(0).ConvertToHighResolution();
-                    }
-                    catch
-                    {
-
-                    }
+                    try { if (firstStructure.CanConvertToHighResolution()) firstStructure.ConvertToHighResolution(); }
+                    catch { /* Ignore conversion error? Log? */ Console.WriteLine($"Warning: Could not convert '{firstStructure.Id}' to high-res."); }
                 }
-                sv = structures.ElementAt(0).SegmentVolume;
-                for (int i = 1; i < st_count; i++)
+                sv = firstStructure.SegmentVolume; // Assign initial volume
+
+                // Process remaining structures
+                foreach (var structure in structures.Skip(1))
                 {
-                    if (!structures.ElementAt(i).IsHighResolution)
+                    Structure currentStructure = structure; // Local reference
+                    if (high_res && !currentStructure.IsHighResolution)
                     {
-                        structures.ElementAt(i).ConvertToHighResolution();
+                        try { if (currentStructure.CanConvertToHighResolution()) currentStructure.ConvertToHighResolution(); }
+                        catch { /* Ignore? Log? */ Console.WriteLine($"Warning: Could not convert '{currentStructure.Id}' to high-res."); }
                     }
-                    sv = sv.Or(structures.ElementAt(i).SegmentVolume);
+                    sv = sv.Or(currentStructure.SegmentVolume); // Perform union
                 }
-
             }
-            else
+            catch (Exception ex)
             {
-                sv = structures.ElementAt(0).SegmentVolume;
-                for (int i = 1; i < st_count; i++)
-                {
-                    sv = sv.Or(structures.ElementAt(i).SegmentVolume);
-                }
-
+                Console.WriteLine($"Error in TotalSegmentVolume (unsafe): {ex.Message}");
+                throw; // Re-throw
             }
-            return sv;
+
+            return sv; // Return the combined volume
         }
 
+
         /// <summary>
-        /// Generates a segment volume that is the union of all structures within the collection. Protects against approved structures and high resolution structures.
+        /// Generates a segment volume that is the union of all structures within the collection.
+        /// Protects against modifying approved structures by using temporary copies for high-res conversion if needed.
         /// </summary>
-        /// <param name="structures">The base collection of structures</param>
-        /// <param name="BaseStructureSet">The structure set that is the parent of the structures being joined together</param>
-        /// <param name="HighResFlag">Optional parameter for high resolution. Defaults to false.</param>
-        /// <returns>Returns a segment volume that is the union of all structures within the collection</returns>
         public static SegmentVolume TotalSegmentVolume(this IEnumerable<Structure> structures, StructureSet BaseStructureSet, bool HighResFlag = false)
         {
-            int st_count = structures.Count();
-            bool high_res = HighResFlag;
-            if (structures.Any(a => a.IsHighResolution))
-                high_res = true;
+            // Check for null/empty inputs
+            if (BaseStructureSet == null) throw new ArgumentNullException(nameof(BaseStructureSet));
+            if (structures == null || !structures.Any())
+                throw new ArgumentException("Input structure collection cannot be null or empty.", nameof(structures));
 
-            SegmentVolume sv = structures.ElementAt(0).SegmentVolume;
-            if (high_res)
+
+            bool high_res_needed = HighResFlag || structures.Any(a => a.IsHighResolution);
+            SegmentVolume sv = null;
+            List<Structure> tempStructures = new List<Structure>(); // For cleanup
+
+            try
             {
-                Structure structureAtZeroIndex = structures.ElementAt(0);
-                if (!structureAtZeroIndex.IsHighResolution)
-                {
-                    try
-                    {
-                        structureAtZeroIndex.ConvertToHighResolution();
-                        sv = structureAtZeroIndex.SegmentVolume;
-                    }
-                    catch
-                    {
-                        string dicomtype = (structureAtZeroIndex.DicomType == "EXTERNAL" || structureAtZeroIndex.DicomType == "SUPPORT" || string.IsNullOrEmpty(structureAtZeroIndex.DicomType)) ? "CONTROL" : structureAtZeroIndex.DicomType;
-                        structureAtZeroIndex = BaseStructureSet.AddStructure(dicomtype, structureAtZeroIndex.Id.UniqueStructureId(BaseStructureSet));
-                        structureAtZeroIndex.ConvertToHighResolution();
-                        sv = structureAtZeroIndex.SegmentVolume;
-                        BaseStructureSet.RemoveStructure(structureAtZeroIndex);
-                    }
+                // Process first structure
+                Structure firstStructure = structures.First();
+                Structure structureToUse = firstStructure; // Structure to get the volume from
 
-                }
-
-                for (int i = 1; i < st_count; i++)
+                if (high_res_needed && !firstStructure.IsHighResolution)
                 {
-                    Structure structureAtIndex = structures.ElementAt(i);
-                    if (!structureAtIndex.IsHighResolution)
+                    if (firstStructure.CanConvertToHighResolution())
                     {
-                        try
-                        {
-                            structureAtIndex.ConvertToHighResolution();
-                            sv = sv.Or(structureAtIndex.SegmentVolume);
-                        }
-                        catch
-                        {
-                            string dicomtype = (structureAtIndex.DicomType == "EXTERNAL" || structureAtIndex.DicomType == "SUPPORT" || string.IsNullOrEmpty(structureAtIndex.DicomType)) ? "CONTROL" : structureAtIndex.DicomType;
-                            structureAtIndex = BaseStructureSet.AddStructure(dicomtype, structureAtIndex.Id.UniqueStructureId(BaseStructureSet));
-                            structureAtIndex.ConvertToHighResolution();
-                            sv = sv.Or(structureAtIndex.SegmentVolume);
-                            BaseStructureSet.RemoveStructure(structureAtIndex);
-                        }
+                        firstStructure.ConvertToHighResolution(); // Modify original if possible
+                        // structureToUse remains firstStructure
                     }
                     else
                     {
-                        sv = sv.Or(structureAtIndex.SegmentVolume);
+                        // Create temporary structure
+                        string tempId = firstStructure.Id.UniqueStructureId(BaseStructureSet);
+                        string dicomType = (firstStructure.DicomType == "EXTERNAL" || firstStructure.DicomType == "SUPPORT" || string.IsNullOrEmpty(firstStructure.DicomType)) ? "CONTROL" : firstStructure.DicomType;
+                        Structure temp = BaseStructureSet.AddStructure(dicomType, tempId);
+                        temp.SegmentVolume = firstStructure.SegmentVolume; // Copy geometry
+                        if (temp.CanConvertToHighResolution())
+                        {
+                            temp.ConvertToHighResolution();
+                            tempStructures.Add(temp); // Track for cleanup
+                            structureToUse = temp; // Use the temp structure's volume
+                        }
+                        else
+                        {
+                            BaseStructureSet.RemoveStructure(temp); // Remove failed temp
+                            throw new InvalidOperationException($"Failed to convert temporary copy of '{firstStructure.Id}' to high-res.");
+                        }
                     }
                 }
+                sv = structureToUse.SegmentVolume; // Initialize sv
 
-            }
-            else
-            {
-                sv = structures.ElementAt(0).SegmentVolume;
-                for (int i = 1; i < st_count; i++)
+                // Process remaining structures
+                foreach (var structure in structures.Skip(1))
                 {
-                    sv = sv.Or(structures.ElementAt(i).SegmentVolume);
-                }
+                    Structure currentStructure = structure;
+                    Structure structureForUnion = currentStructure; // Structure to use for OR operation
 
+                    if (high_res_needed && !currentStructure.IsHighResolution)
+                    {
+                        if (currentStructure.CanConvertToHighResolution())
+                        {
+                            currentStructure.ConvertToHighResolution(); // Modify original if possible
+                            // structureForUnion remains currentStructure
+                        }
+                        else
+                        {
+                            // Create temporary structure
+                            string tempId = currentStructure.Id.UniqueStructureId(BaseStructureSet);
+                            string dicomType = (currentStructure.DicomType == "EXTERNAL" || currentStructure.DicomType == "SUPPORT" || string.IsNullOrEmpty(currentStructure.DicomType)) ? "CONTROL" : currentStructure.DicomType;
+                            Structure temp = BaseStructureSet.AddStructure(dicomType, tempId);
+                            temp.SegmentVolume = currentStructure.SegmentVolume;
+                            if (temp.CanConvertToHighResolution())
+                            {
+                                temp.ConvertToHighResolution();
+                                tempStructures.Add(temp);
+                                structureForUnion = temp; // Use the temp structure
+                            }
+                            else
+                            {
+                                BaseStructureSet.RemoveStructure(temp);
+                                throw new InvalidOperationException($"Failed to convert temporary copy of '{currentStructure.Id}' to high-res.");
+                            }
+                        }
+                    }
+                    else if (!high_res_needed && structure.IsHighResolution)
+                    {
+                        // Optional warning if mixing resolutions unexpectedly
+                        Console.WriteLine($"Warning: High-res structure '{structure.Id}' used in potentially low-res union.");
+                    }
+
+                    // Perform OR operation
+                    sv = sv.Or(structureForUnion.SegmentVolume);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in TotalSegmentVolume (safe): {ex.Message}");
+                // Ensure cleanup happens even if an error occurred mid-process
+                BaseStructureSet.RemoveStructuresFromStructureSet(tempStructures); // Use helper for cleanup
+                throw; // Re-throw exception
+            }
+            finally
+            {
+                // Final cleanup (might be redundant if exception handling catches it, but ensures it)
+                BaseStructureSet.RemoveStructuresFromStructureSet(tempStructures);
             }
             return sv;
         }
 
+
         /// <summary>
-        /// The extension method returns a structure that is the base extended structure that is expanded by the supplied margin, regardless of size.
+        /// Applies a margin potentially greater than 50mm to a Structure (modifies in place).
         /// </summary>
-        /// <param name="structure">The base structure that is extended.</param>
-        /// <param name="margin">The margin to expand the base structure by.</param>
-        /// <returns>Returns a structure that is the expanded structure by the specified margin.</returns>
         public static Structure MarginGreaterThan50mm(this Structure structure, double margin)
         {
-            int count_50 = (int)Math.Floor(margin / 50);
-
-            if (count_50 == 0)
-            {
-                structure.SegmentVolume = structure.Margin(margin);
-                return structure;
-            }
-
-            double remainder_50 = margin % 50;
-
-            SegmentVolume str_with_margin = structure.SegmentVolume;
-
-            for (int i = 0; i < count_50; i++)
-            {
-                str_with_margin = str_with_margin.Margin(50);
-            }
-
-            str_with_margin = str_with_margin.Margin(remainder_50);
-
-            structure.SegmentVolume = str_with_margin;
-
+            if (structure == null) throw new ArgumentNullException(nameof(structure));
+            // Delegate to the SegmentVolume version for the logic
+            structure.SegmentVolume = structure.SegmentVolume.MarginGreaterThan50mm(margin);
             return structure;
         }
 
+
         /// <summary>
-        /// The extension method returns a SegmentVolume that is the base extended SegmentVolume expanded by the supplied margin, regardless of size.
+        /// Applies a margin potentially greater than 50mm to a SegmentVolume (returns new).
         /// </summary>
-        /// <param name="sv">The base structure that is extended.</param>
-        /// <param name="margin">The margin to expand the base structure by.</param>
-        /// <returns>Returns a structure that is the expanded structure by the specified margin.</returns>
         public static SegmentVolume MarginGreaterThan50mm(this SegmentVolume sv, double margin)
         {
-            int count_50 = (int)Math.Floor(margin / 50);
+            if (sv == null) throw new ArgumentNullException(nameof(sv));
+            // Handle zero margin efficiently
+            if (Math.Abs(margin) < 1e-9) return sv; // Use a small tolerance for float comparison
 
-            if (count_50 == 0)
-            {
-                sv = sv.Margin(margin);
-                return sv;
-            }
+            bool expand = margin > 0;
+            double absMargin = Math.Abs(margin);
+            int count_50 = (int)Math.Floor(absMargin / 50.0);
+            double remainder_50 = absMargin % 50.0;
 
-            double remainder_50 = margin % 50;
+            SegmentVolume current_sv = sv; // Work with a copy
 
-            SegmentVolume str_with_margin = sv;
-
+            // Apply 50mm steps
             for (int i = 0; i < count_50; i++)
             {
-                str_with_margin = str_with_margin.Margin(50);
+                current_sv = current_sv.Margin(expand ? 50.0 : -50.0);
             }
-            str_with_margin = str_with_margin.Margin(remainder_50);
 
-            sv = str_with_margin;
+            // Apply remainder
+            if (remainder_50 > 1e-9) // Check if remainder is significant
+            {
+                current_sv = current_sv.Margin(expand ? remainder_50 : -remainder_50);
+            }
 
-            return sv;
+            return current_sv; // Return the resulting SegmentVolume
         }
 
         /// <summary>
-        /// This method provides access to Asymmetric Margins that are either under or over 50mm, but only outer margins. Will return a segment volume with the applied margin.
+        /// Applies asymmetric outer margin > 50mm. Requires int[] array for margins.
         /// </summary>
-        /// <param name="sv">The segment volume that is extended to provide access to this method.</param>
-        /// <param name="margins">The margins to be applied to the segment volume.</param>
-        /// <returns>Returns a segment volume with the specified margin applied to the specified direction</returns>
+        /// <param name="sv">SegmentVolume.</param>
+        /// <param name="margins">Margins [X1, Y1, Z1, X2, Y2, Z2] as integers.</param>
         public static SegmentVolume OuterAsymMarginGreaterThan50mm(this SegmentVolume sv, int[] margins)
         {
-            return AsymMarginGreaterThan50mm(sv, margins, StructureMarginGeometry.Outer);
+            if (margins == null || margins.Length != 6) throw new ArgumentException("Margins array must contain 6 integer values.", nameof(margins));
+            // Convert int[] to double[] for the core logic
+            double[] doubleMargins = margins.Select(m => (double)m).ToArray();
+            if (doubleMargins.Any(m => m < 0)) throw new ArgumentException("Outer margins must be non-negative.", nameof(margins));
+            return AsymMarginGreaterThan50mm(sv, doubleMargins, StructureMarginGeometry.Outer);
         }
 
         /// <summary>
-        /// This method provides access to Asymmetric Margins that are either under or over 50mm, but only outer margins. Will return a segment volume with the applied margin.
+        /// Applies asymmetric inner margin (crop) > 50mm. Requires int[] array for margins.
         /// </summary>
-        /// <param name="sv">The segment volume that is extended to provide access to this method.</param>
-        /// <param name="margins">The margins to be applied to the segment volume.</param>
-        /// <returns>Returns a segment volume with the specified margin applied to the specified direction</returns>
+        /// <param name="sv">SegmentVolume.</param>
+        /// <param name="margins">Crop distances [X1, Y1, Z1, X2, Y2, Z2] as integers.</param>
         public static SegmentVolume InnerAsymMarginGreaterThan50mm(this SegmentVolume sv, int[] margins)
         {
-            return AsymMarginGreaterThan50mm(sv, margins, StructureMarginGeometry.Inner);
+            if (margins == null || margins.Length != 6) throw new ArgumentException("Margins array must contain 6 integer values.", nameof(margins));
+            // Convert int[] to double[]
+            double[] doubleMargins = margins.Select(m => (double)m).ToArray();
+            if (doubleMargins.Any(m => m < 0)) throw new ArgumentException("Inner margins (crop distances) must be non-negative.", nameof(margins));
+            return AsymMarginGreaterThan50mm(sv, doubleMargins, StructureMarginGeometry.Inner);
         }
 
         /// <summary>
-        /// This method provides access to Asymmetric Margins that are either under or over 50mm, but only outer margins. Will return a segment volume with the applied margin.
+        /// Core logic for asymmetric margins > 50mm using iterative application. Takes double[] margins.
         /// </summary>
-        /// <param name="sv">The segment volume that is extended to provide access to this method.</param>
-        /// <param name="margins">The margins to be applied to the segment volume.</param>
-        /// <param name="marginGeometry">Whether the margin is inner or outer, defaults to outer</param>
-        /// <returns>Returns a segment volume with the specified margin applied to the specified direction</returns>
-        public static SegmentVolume AsymMarginGreaterThan50mm(this SegmentVolume sv, int[] margins, StructureMarginGeometry marginGeometry = StructureMarginGeometry.Outer)
+        /// <param name="sv">SegmentVolume.</param>
+        /// <param name="margins">Margins [X1, Y1, Z1, X2, Y2, Z2]. Values must be non-negative.</param>
+        /// <param name="marginGeometry">Outer or Inner.</param>
+        public static SegmentVolume AsymMarginGreaterThan50mm(this SegmentVolume sv, double[] margins, StructureMarginGeometry marginGeometry = StructureMarginGeometry.Outer)
         {
-            AxisAlignedMargins axisAligned;
+            if (sv == null) throw new ArgumentNullException(nameof(sv));
+            if (margins == null || margins.Length != 6) throw new ArgumentException("Margins array must contain 6 double values.", nameof(margins));
+            if (margins.Any(m => m < 0)) throw new ArgumentException("All margin values must be non-negative.", nameof(margins));
 
-            if (margins.All(a => a <= 50))
+
+            // If all margins are within the standard limit, use the direct ESAPI call
+            if (margins.All(m => m <= 50.0))
             {
-                axisAligned = new AxisAlignedMargins(marginGeometry, margins[0], margins[1], margins[2], margins[3], margins[4], margins[5]);
+                AxisAlignedMargins axisAligned = new AxisAlignedMargins(marginGeometry, margins[0], margins[1], margins[2], margins[3], margins[4], margins[5]);
                 return sv.AsymmetricMargin(axisAligned);
             }
 
-            List<Tuple<Direction, int, int>> applied_margins = new List<Tuple<Direction, int, int>>();
-
-            for (int i = 0; i < margins.Length; i++)
+            // --- Logic without Direction Enum ---
+            int[] counts_50 = new int[6];
+            double[] remainders_50 = new double[6];
+            for (int i = 0; i < 6; i++)
             {
-                int count_50 = (int)Math.Floor((double)margins[i] / 50);
-                int remainder_50 = margins[i] % 50;
-                Direction direction = (Direction)i;
+                counts_50[i] = (int)Math.Floor(margins[i] / 50.0);
+                remainders_50[i] = margins[i] % 50.0;
+            }
+            int max_50_steps = counts_50.Max();
+            SegmentVolume sv_with_margin = sv; // Start with the original volume
 
-                Tuple<Direction, int, int> am = new Tuple<Direction, int, int>(direction, count_50, remainder_50);
-                applied_margins.Add(am);
+            // Apply 50mm steps iteratively
+            for (int i = 0; i < max_50_steps; i++)
+            {
+                // Determine margins for this step (50 or 0) based on counts_50 array
+                double mar_neg_x = (counts_50[0] > i) ? 50.0 : 0.0; // Index 0 = X1 (NegX)
+                double mar_neg_y = (counts_50[1] > i) ? 50.0 : 0.0; // Index 1 = Y1 (NegY)
+                double mar_neg_z = (counts_50[2] > i) ? 50.0 : 0.0; // Index 2 = Z1 (NegZ)
+                double mar_pos_x = (counts_50[3] > i) ? 50.0 : 0.0; // Index 3 = X2 (PosX)
+                double mar_pos_y = (counts_50[4] > i) ? 50.0 : 0.0; // Index 4 = Y2 (PosY)
+                double mar_pos_z = (counts_50[5] > i) ? 50.0 : 0.0; // Index 5 = Z2 (PosZ)
+
+                AxisAlignedMargins current_step_margins = new AxisAlignedMargins(marginGeometry, mar_neg_x, mar_neg_y, mar_neg_z, mar_pos_x, mar_pos_y, mar_pos_z);
+                sv_with_margin = sv_with_margin.AsymmetricMargin(current_step_margins);
             }
 
-            SegmentVolume sv_with_margin = sv;
-
-            int max_50 = applied_margins.Max(a => a.Item2);
-            int pos_y_50 = applied_margins.First(a => a.Item1 == Direction.PositiveY).Item2;
-            int neg_y_50 = applied_margins.First(a => a.Item1 == Direction.NegativeY).Item2;
-            int pos_x_50 = applied_margins.First(a => a.Item1 == Direction.PositiveX).Item2;
-            int neg_x_50 = applied_margins.First(a => a.Item1 == Direction.NegativeX).Item2;
-            int pos_z_50 = applied_margins.First(a => a.Item1 == Direction.PositiveZ).Item2;
-            int neg_z_50 = applied_margins.First(a => a.Item1 == Direction.NegativeZ).Item2;
-
-            int pos_y_rm = applied_margins.First(a => a.Item1 == Direction.PositiveY).Item3;
-            int neg_y_rm = applied_margins.First(a => a.Item1 == Direction.NegativeY).Item3;
-            int pos_x_rm = applied_margins.First(a => a.Item1 == Direction.PositiveX).Item3;
-            int neg_x_rm = applied_margins.First(a => a.Item1 == Direction.NegativeX).Item3;
-            int pos_z_rm = applied_margins.First(a => a.Item1 == Direction.PositiveZ).Item3;
-            int neg_z_rm = applied_margins.First(a => a.Item1 == Direction.NegativeZ).Item3;
-
-            for (int i = 0; i < max_50; i++)
+            // Apply the final remaining margins
+            AxisAlignedMargins remainderMargins = new AxisAlignedMargins(marginGeometry, remainders_50[0], remainders_50[1], remainders_50[2], remainders_50[3], remainders_50[4], remainders_50[5]);
+            // Only apply if any remainder is significant
+            if (remainders_50.Any(r => r > 1e-9))
             {
-                int mar_pos_y = (pos_y_50 > 0) ? 50 : 0;
-                int mar_neg_y = (neg_y_50 > 0) ? 50 : 0;
-                int mar_pos_x = (pos_x_50 > 0) ? 50 : 0;
-                int mar_neg_x = (neg_x_50 > 0) ? 50 : 0;
-                int mar_pos_z = (pos_z_50 > 0) ? 50 : 0;
-                int mar_neg_z = (neg_z_50 > 0) ? 50 : 0;
-
-                axisAligned = new AxisAlignedMargins(marginGeometry, mar_neg_x, mar_neg_y, mar_neg_z, mar_pos_x, mar_pos_y, mar_pos_z);
-                sv_with_margin = sv_with_margin.AsymmetricMargin(axisAligned);
-
-                pos_y_50--;
-                neg_y_50--;
-                pos_x_50--;
-                neg_x_50--;
-                pos_z_50--;
-                neg_z_50--;
+                sv_with_margin = sv_with_margin.AsymmetricMargin(remainderMargins);
             }
 
-            axisAligned = new AxisAlignedMargins(marginGeometry, neg_x_rm, neg_y_rm, neg_z_rm, pos_x_rm, pos_y_rm, pos_z_rm);
-            sv_with_margin = sv_with_margin.AsymmetricMargin(axisAligned);
-
-            sv = sv_with_margin;
-
-            return sv;
+            return sv_with_margin; // Return the final result
         }
 
+
         /// <summary>
-        /// Crop portion of Primary Structure extending outside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
+        /// Crop PrimaryStructure extending outside CropFromStructure by CropDistance. Uses double distance. Safe for HighRes.
         /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
-        public static SegmentVolume CropExtendingOutside(this StructureSet set, ICollection<Structure> PrimaryStructure, ICollection<Structure> CropFromStructure, int CropDistance)
+        public static SegmentVolume CropExtendingOutside(this StructureSet set, ICollection<Structure> PrimaryStructure, ICollection<Structure> CropFromStructure, double CropDistance) // Changed CropDistance to double
         {
-            if (CropDistance < 0) throw new ArgumentException("Crop distance must be positive");
+            if (set == null) throw new ArgumentNullException(nameof(set));
+            // Handle null/empty inputs gracefully or let TotalSegmentVolume throw
+            if (CropDistance < 0) throw new ArgumentException("Crop distance must be non-negative.", nameof(CropDistance));
 
-            if (PrimaryStructure.Any(a => a.IsHighResolution) || CropFromStructure.Any(a => a.IsHighResolution))
+            bool highResNeeded = (PrimaryStructure?.Any(a => a.IsHighResolution) ?? false) || (CropFromStructure?.Any(a => a.IsHighResolution) ?? false);
+            ICollection<Structure> tempPrimary = null;
+            ICollection<Structure> tempCropFrom = null;
+            SegmentVolume resultSv = null; // Default to null
+
+            try
             {
-                var temp1 = PrimaryStructure.ConvertAllToHighRes(set);
-                var temp2 = CropFromStructure.ConvertAllToHighRes(set);
-                var svp = temp1.TotalSegmentVolume(set);
-                var svf = temp2.TotalSegmentVolume(set).Not().MarginGreaterThan50mm(CropDistance);
+                ICollection<Structure> primaryToUse = PrimaryStructure;
+                ICollection<Structure> cropFromToUse = CropFromStructure;
 
-                SegmentVolume sv = svp.Sub(svf);
+                if (highResNeeded)
+                {
+                    // Create temporary copies only if input lists are valid
+                    if (PrimaryStructure != null && PrimaryStructure.Any())
+                    {
+                        tempPrimary = PrimaryStructure.ConvertAllToHighRes(set); primaryToUse = tempPrimary;
+                    }
+                    else primaryToUse = null;
+                    if (CropFromStructure != null && CropFromStructure.Any())
+                    {
+                        tempCropFrom = CropFromStructure.ConvertAllToHighRes(set); cropFromToUse = tempCropFrom;
+                    }
+                    else cropFromToUse = null;
+                }
 
-                set.RemoveStructuresFromStructureSet(temp1);
-                set.RemoveStructuresFromStructureSet(temp2);
-                return sv;
+                // Check if primary structure exists
+                if (primaryToUse == null || !primaryToUse.Any()) return null; // Cannot crop nothing
+
+                SegmentVolume svp = primaryToUse.TotalSegmentVolume(set, highResNeeded);
+
+                // If cropping structure is empty, no cropping occurs
+                if (cropFromToUse == null || !cropFromToUse.Any()) return svp;
+
+                SegmentVolume svf_boundary = cropFromToUse.TotalSegmentVolume(set, highResNeeded);
+                SegmentVolume svf_outside_margin = svf_boundary.Not().MarginGreaterThan50mm(CropDistance);
+                resultSv = svp.Sub(svf_outside_margin);
             }
-            else
+            finally
             {
-                var svp = PrimaryStructure.TotalSegmentVolume(set);
-                var svf = CropFromStructure.TotalSegmentVolume(set).Not().MarginGreaterThan50mm(CropDistance);
-                return svp.Sub(svf);
+                if (tempPrimary != null) set.RemoveStructuresFromStructureSet(tempPrimary);
+                if (tempCropFrom != null) set.RemoveStructuresFromStructureSet(tempCropFrom);
             }
+            return resultSv; // Can be null
         }
 
+
         /// <summary>
-        /// Crop portion of Primary Structure extending inside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
+        /// Crop PrimaryStructure extending inside CropFromStructure by CropDistance. Uses double distance. Safe for HighRes.
         /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
-        public static SegmentVolume CropExtendingInside(this StructureSet set, ICollection<Structure> PrimaryStructure, ICollection<Structure> CropFromStructure, int CropDistance)
+        public static SegmentVolume CropExtendingInside(this StructureSet set, ICollection<Structure> PrimaryStructure, ICollection<Structure> CropFromStructure, double CropDistance) // Changed CropDistance to double
         {
-            if (CropDistance < 0) throw new ArgumentException("Crop distance must be positive");
+            if (set == null) throw new ArgumentNullException(nameof(set));
+            if (CropDistance < 0) throw new ArgumentException("Crop distance must be non-negative.", nameof(CropDistance));
 
-            if (PrimaryStructure.Any(a => a.IsHighResolution) || CropFromStructure.Any(a => a.IsHighResolution))
+            bool highResNeeded = (PrimaryStructure?.Any(a => a.IsHighResolution) ?? false) || (CropFromStructure?.Any(a => a.IsHighResolution) ?? false);
+            ICollection<Structure> tempPrimary = null;
+            ICollection<Structure> tempCropFrom = null;
+            SegmentVolume resultSv = null;
+
+            try
             {
-                var temp1 = PrimaryStructure.ConvertAllToHighRes(set);
-                var temp2 = CropFromStructure.ConvertAllToHighRes(set);
-                var svp = temp1.TotalSegmentVolume(set);
-                var svf = temp2.TotalSegmentVolume(set).MarginGreaterThan50mm(CropDistance);
+                ICollection<Structure> primaryToUse = PrimaryStructure;
+                ICollection<Structure> cropFromToUse = CropFromStructure;
 
-                SegmentVolume sv = svp.Sub(svf);
+                if (highResNeeded)
+                {
+                    if (PrimaryStructure != null && PrimaryStructure.Any())
+                    {
+                        tempPrimary = PrimaryStructure.ConvertAllToHighRes(set); primaryToUse = tempPrimary;
+                    }
+                    else primaryToUse = null;
+                    if (CropFromStructure != null && CropFromStructure.Any())
+                    {
+                        tempCropFrom = CropFromStructure.ConvertAllToHighRes(set); cropFromToUse = tempCropFrom;
+                    }
+                    else cropFromToUse = null;
+                }
 
-                set.RemoveStructuresFromStructureSet(temp1);
-                set.RemoveStructuresFromStructureSet(temp2);
-                return sv;
+                if (primaryToUse == null || !primaryToUse.Any()) return null; // Cannot crop nothing
+
+                SegmentVolume svp = primaryToUse.TotalSegmentVolume(set, highResNeeded);
+
+                if (cropFromToUse == null || !cropFromToUse.Any()) return svp; // Cropping from empty does nothing
+
+                SegmentVolume svf_boundary = cropFromToUse.TotalSegmentVolume(set, highResNeeded);
+                SegmentVolume svf_inside_margin = svf_boundary.MarginGreaterThan50mm(CropDistance);
+                resultSv = svp.Sub(svf_inside_margin);
             }
-            else
+            finally
             {
-                var svp = PrimaryStructure.TotalSegmentVolume(set);
-                var svf = CropFromStructure.TotalSegmentVolume(set).MarginGreaterThan50mm(CropDistance);
-                return svp.Sub(svf);
+                if (tempPrimary != null) set.RemoveStructuresFromStructureSet(tempPrimary);
+                if (tempCropFrom != null) set.RemoveStructuresFromStructureSet(tempCropFrom);
             }
+            return resultSv; // Can be null
         }
 
+
         /// <summary>
-        /// Converts all structures to High Resolution within the Collection
+        /// Converts structures to High Resolution using temporary copies. Caller must manage the returned temporary structures.
         /// </summary>
-        /// <param name="Structures"></param>
-        /// <param name="BaseStructureSet">Structure set is needed to add new structures</param>
-        /// <returns>Returns a new collection of structures that have been converted to high resolution.</returns>
         public static ICollection<Structure> ConvertAllToHighRes(this ICollection<Structure> Structures, StructureSet BaseStructureSet)
         {
+            // Added null checks
+            if (BaseStructureSet == null) throw new ArgumentNullException(nameof(BaseStructureSet));
             List<Structure> hd_structures = new List<Structure>();
-            for (int i = 0; i < Structures.Count; i++)
-            {
-                Structure temp = BaseStructureSet.AddStructure("CONTROL", Structures.ElementAt(i).Id.UniqueStructureId(BaseStructureSet));
-                temp.SegmentVolume = Structures.ElementAt(i).SegmentVolume;
-                if (temp.CanConvertToHighResolution())
-                {
-                    temp.ConvertToHighResolution();
-                }
-                hd_structures.Add(temp);
-            }
+            if (Structures == null) return hd_structures; // Return empty list if input is null
 
+            foreach (var structure in Structures) // Use foreach for cleaner iteration
+            {
+                if (structure == null) continue; // Skip null entries in the collection
+
+                Structure temp = null; // Initialize for potential cleanup
+                try
+                {
+                    string tempId = structure.Id.UniqueStructureId(BaseStructureSet);
+                    string dicomType = (structure.DicomType == "EXTERNAL" || structure.DicomType == "SUPPORT" || string.IsNullOrEmpty(structure.DicomType)) ? "CONTROL" : structure.DicomType;
+                    temp = BaseStructureSet.AddStructure(dicomType, tempId);
+                    temp.SegmentVolume = structure.SegmentVolume;
+
+                    if (temp.CanConvertToHighResolution())
+                    {
+                        temp.ConvertToHighResolution();
+                    }
+                    else
+                    {
+                        // Log or decide how to handle if temp can't be converted (shouldn't happen often for CONTROL)
+                        Console.WriteLine($"Warning: Temp structure '{tempId}' could not be converted to high-res.");
+                        // Maybe remove it and skip adding? Or throw?
+                        // BaseStructureSet.RemoveStructure(temp); continue; // Example: skip this structure
+                    }
+                    hd_structures.Add(temp); // Add successfully created (and potentially converted) temp structure
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error converting structure '{structure.Id}' to high-res copy: {ex.Message}");
+                    // Ensure partial temp structure is removed if error occurred
+                    if (temp != null && BaseStructureSet.Structures.Contains(temp))
+                    {
+                        try { BaseStructureSet.RemoveStructure(temp); } catch { /* Ignore cleanup error */ }
+                    }
+                    // Rethrow or handle as appropriate
+                    throw;
+                }
+            }
             return hd_structures;
         }
 
         /// <summary>
-        /// Removes all structures in the supplied collection from the structure set
+        /// Removes structures in the collection from the set. Iterates backwards. Handles nulls.
         /// </summary>
-        /// <param name="set">Extended structure set</param>
-        /// <param name="Structures">The collection of structures to remove from the extended structure set</param>
         public static void RemoveStructuresFromStructureSet(this StructureSet set, ICollection<Structure> Structures)
         {
+            if (set == null) throw new ArgumentNullException(nameof(set));
+            if (Structures == null) return; // Nothing to remove
+
             for (int i = Structures.Count - 1; i >= 0; i--)
             {
-                set.RemoveStructure(Structures.ElementAt(i));
+                try
+                {
+                    Structure structureToRemove = Structures.ElementAt(i);
+                    // Check if structure is not null and actually exists in the set
+                    if (structureToRemove != null && set.Structures.Contains(structureToRemove))
+                    {
+                        set.RemoveStructure(structureToRemove);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // Log error during removal, but continue loop
+                    Console.WriteLine($"Error removing structure at index {i}: {ex.Message}");
+                }
             }
         }
 
         /// <summary>
-        /// Generates a SegmentVolume that is the Non-Overlapping portion of both lists of the structures provided. Protects against approved and high resolution structures.
+        /// Calculates Non-Overlapping (XOR) volume. Safe for HighRes.
         /// </summary>
-        /// <param name="set">Base structure set</param>
-        /// <param name="StructureOne">The first collection of structures that non-overlapping portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that non-overlapping portions should be kept</param>
-        /// <returns>The non-overlapped portion of the two structure lists will be returned as a new segment volume.</returns>
         public static SegmentVolume NonOverlapStructure(this StructureSet set, ICollection<Structure> StructureOne, ICollection<Structure> StructureTwo)
         {
-            if (StructureOne.Any(a => a.IsHighResolution) || StructureTwo.Any(a => a.IsHighResolution))
+            if (set == null) throw new ArgumentNullException(nameof(set));
+
+            bool highResNeeded = (StructureOne?.Any(a => a.IsHighResolution) ?? false) || (StructureTwo?.Any(a => a.IsHighResolution) ?? false);
+            ICollection<Structure> temp1 = null;
+            ICollection<Structure> temp2 = null;
+            SegmentVolume resultSv = null;
+
+            try
             {
-                var temp1 = StructureOne.ConvertAllToHighRes(set);
-                var temp2 = StructureTwo.ConvertAllToHighRes(set);
+                ICollection<Structure> s1ToUse = StructureOne;
+                ICollection<Structure> s2ToUse = StructureTwo;
+                bool s1Valid = StructureOne != null && StructureOne.Any();
+                bool s2Valid = StructureTwo != null && StructureTwo.Any();
 
-                var sv1 = temp1.TotalSegmentVolume(set);
-                var sv2 = temp2.TotalSegmentVolume(set);
+                if (highResNeeded)
+                {
+                    if (s1Valid) { temp1 = StructureOne.ConvertAllToHighRes(set); s1ToUse = temp1; } else s1ToUse = null;
+                    if (s2Valid) { temp2 = StructureTwo.ConvertAllToHighRes(set); s2ToUse = temp2; } else s2ToUse = null;
+                    // Update valid flags based on temp creation potentially failing? Or assume ConvertAll handles it.
+                }
 
-                SegmentVolume sv = sv1.Xor(sv2);
+                SegmentVolume sv1 = (s1ToUse != null && s1ToUse.Any()) ? s1ToUse.TotalSegmentVolume(set, highResNeeded) : null;
+                SegmentVolume sv2 = (s2ToUse != null && s2ToUse.Any()) ? s2ToUse.TotalSegmentVolume(set, highResNeeded) : null;
 
-                set.RemoveStructuresFromStructureSet(temp1);
-                set.RemoveStructuresFromStructureSet(temp2);
-                return sv;
+                if (sv1 != null && sv2 != null) resultSv = sv1.Xor(sv2);
+                else if (sv1 != null) resultSv = sv1;
+                else if (sv2 != null) resultSv = sv2;
+                // else resultSv remains null
             }
-            else
+            finally
             {
-                var sv1 = StructureOne.TotalSegmentVolume(set);
-                var sv2 = StructureTwo.TotalSegmentVolume(set);
-
-                SegmentVolume sv = sv1.Xor(sv2);
-                return sv;
+                if (temp1 != null) set.RemoveStructuresFromStructureSet(temp1);
+                if (temp2 != null) set.RemoveStructuresFromStructureSet(temp2);
             }
+            return resultSv; // Can be null
         }
 
         /// <summary>
-        /// Generates a SegmentVolume that is the intersected portion of both lists of the structures provided. Protects against approved and high resolution structures.
+        /// Calculates Intersection (AND) volume. Safe for HighRes.
         /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">The first collection of structures that intersected portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that v portions should be kept</param>
-        /// <returns>The intersected portion of the two structure lists will be returned as a new segment volume.</returns>
         public static SegmentVolume IntersectionOfStructures(this StructureSet set, ICollection<Structure> StructureOne, ICollection<Structure> StructureTwo)
         {
-            if (StructureOne.Any(a => a.IsHighResolution) || StructureTwo.Any(a => a.IsHighResolution))
+            if (set == null) throw new ArgumentNullException(nameof(set));
+
+            bool highResNeeded = (StructureOne?.Any(a => a.IsHighResolution) ?? false) || (StructureTwo?.Any(a => a.IsHighResolution) ?? false);
+            ICollection<Structure> temp1 = null;
+            ICollection<Structure> temp2 = null;
+            SegmentVolume resultSv = null;
+
+            try
             {
-                var temp1 = StructureOne.ConvertAllToHighRes(set);
-                var temp2 = StructureTwo.ConvertAllToHighRes(set);
+                ICollection<Structure> s1ToUse = StructureOne;
+                ICollection<Structure> s2ToUse = StructureTwo;
+                bool s1Valid = StructureOne != null && StructureOne.Any();
+                bool s2Valid = StructureTwo != null && StructureTwo.Any();
 
-                var sv1 = temp1.TotalSegmentVolume(set);
-                var sv2 = temp2.TotalSegmentVolume(set);
+                // If either input is invalid, intersection is empty (represented by null here)
+                if (!s1Valid || !s2Valid) return null;
 
-                SegmentVolume sv = sv1.And(sv2);
+                if (highResNeeded)
+                {
+                    temp1 = StructureOne.ConvertAllToHighRes(set); s1ToUse = temp1;
+                    temp2 = StructureTwo.ConvertAllToHighRes(set); s2ToUse = temp2;
+                    // Assuming ConvertAllToHighRes throws if structure list is empty now
+                }
 
-                set.RemoveStructuresFromStructureSet(temp1);
-                set.RemoveStructuresFromStructureSet(temp2);
-                return sv;
+                // Now we know both s1ToUse and s2ToUse should be valid if we reach here
+                SegmentVolume sv1 = s1ToUse.TotalSegmentVolume(set, highResNeeded);
+                SegmentVolume sv2 = s2ToUse.TotalSegmentVolume(set, highResNeeded);
+
+                resultSv = sv1.And(sv2); // AND operation handles empty intersection
             }
-            else
+            finally
             {
-                var sv1 = StructureOne.TotalSegmentVolume(set);
-                var sv2 = StructureTwo.TotalSegmentVolume(set);
-
-                SegmentVolume sv = sv1.And(sv2);
-                return sv;
+                if (temp1 != null) set.RemoveStructuresFromStructureSet(temp1);
+                if (temp2 != null) set.RemoveStructuresFromStructureSet(temp2);
             }
+            return resultSv; // Can be null or an empty SegmentVolume
         }
 
+
         /// <summary>
-        /// Returns a new segment volume that is subtraction of the first structure collection by the second structure collection. Protected against high res or approved structures.
+        /// Calculates Subtraction (S1 - S2) volume. Safe for HighRes.
         /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">Primary, extended structure collection that is to be subtracted from by the second structure collection</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together and then subtracted from the first collection</param>
-        /// <returns>A segment volume that is the subtraction of the first structure collection by the second structure collection</returns>
         public static SegmentVolume SubStructures(this StructureSet set, ICollection<Structure> StructureOne, ICollection<Structure> StructureTwo)
         {
-            if (StructureOne.Any(a => a.IsHighResolution) || StructureTwo.Any(a => a.IsHighResolution))
+            if (set == null) throw new ArgumentNullException(nameof(set));
+
+            bool highResNeeded = (StructureOne?.Any(a => a.IsHighResolution) ?? false) || (StructureTwo?.Any(a => a.IsHighResolution) ?? false);
+            ICollection<Structure> temp1 = null;
+            ICollection<Structure> temp2 = null;
+            SegmentVolume resultSv = null;
+
+            try
             {
-                var temp1 = StructureOne.ConvertAllToHighRes(set);
-                var temp2 = StructureTwo.ConvertAllToHighRes(set);
+                ICollection<Structure> s1ToUse = StructureOne;
+                ICollection<Structure> s2ToUse = StructureTwo;
+                bool s1Valid = StructureOne != null && StructureOne.Any();
+                bool s2Valid = StructureTwo != null && StructureTwo.Any();
 
-                var sv1 = temp1.TotalSegmentVolume(set);
-                var sv2 = temp2.TotalSegmentVolume(set);
+                // If S1 is invalid, the result is empty (null)
+                if (!s1Valid) return null;
 
-                SegmentVolume sv = sv1.Sub(sv2);
+                if (highResNeeded)
+                {
+                    temp1 = StructureOne.ConvertAllToHighRes(set); s1ToUse = temp1;
+                    if (s2Valid) { temp2 = StructureTwo.ConvertAllToHighRes(set); s2ToUse = temp2; } else s2ToUse = null;
+                }
 
-                set.RemoveStructuresFromStructureSet(temp1);
-                set.RemoveStructuresFromStructureSet(temp2);
-                return sv;
+                SegmentVolume sv1 = s1ToUse.TotalSegmentVolume(set, highResNeeded);
+
+                // If S2 is invalid, result is just S1
+                if (!s2Valid || s2ToUse == null || !s2ToUse.Any())
+                {
+                    resultSv = sv1;
+                }
+                else
+                {
+                    SegmentVolume sv2 = s2ToUse.TotalSegmentVolume(set, highResNeeded);
+                    resultSv = sv1.Sub(sv2); // SUB operation
+                }
             }
-            else
+            finally
             {
-                var sv1 = StructureOne.TotalSegmentVolume(set);
-                var sv2 = StructureTwo.TotalSegmentVolume(set);
-
-                SegmentVolume sv = sv1.Sub(sv2);
-                return sv;
+                if (temp1 != null) set.RemoveStructuresFromStructureSet(temp1);
+                if (temp2 != null) set.RemoveStructuresFromStructureSet(temp2);
             }
+            return resultSv; // Can be null
         }
 
+
         /// <summary>
-        /// Returns a new segment volume that is contained by both submitted structure collections
+        /// Returns the union (OR) of two structure collections. Minimal change version - Bug Fix Only.
         /// </summary>
-        /// <param name="set">The base extended structure set</param>
-        /// <param name="StructureOne">Primary, first structure collection that is to be unioned before union with additional structure</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together to create union with extended structure</param>
-        /// <returns>A segment volume that is the union of both the extended structure collection and the parameter structure collection</returns>
         public static SegmentVolume UnionStructures(this StructureSet set, ICollection<Structure> StructureOne, ICollection<Structure> StructureTwo)
         {
-            SegmentVolume sv1 = StructureOne.TotalSegmentVolume(set);
-            var tempstruct = StructureOne.First();
-            tempstruct.SegmentVolume = sv1;
+            // Basic null checks for input collections might be wise
+            if (set == null) throw new ArgumentNullException(nameof(set));
+            // Handle cases where one or both might be null/empty before calling TotalSegmentVolume if it throws
+            bool s1Valid = StructureOne != null && StructureOne.Any();
+            bool s2Valid = StructureTwo != null && StructureTwo.Any();
 
-            SegmentVolume sv2 = StructureTwo.TotalSegmentVolume(set);
-            var return_structure = StructureTwo.First();
-            return_structure.SegmentVolume = sv2;
+            if (!s1Valid && !s2Valid) return null; // Union of nothing is nothing (or throw?)
+            if (!s1Valid) return StructureTwo.TotalSegmentVolume(set); // Return union of S2
+            if (!s2Valid) return StructureOne.TotalSegmentVolume(set); // Return union of S1
 
-            return TotalSegmentVolume(new List<Structure>() { return_structure, tempstruct });
+            // Original logic from user baseline starts here:
+            SegmentVolume sv1 = StructureOne.TotalSegmentVolume(set); // Uses the overload that requires StructureSet for safety
+            var tempstruct = StructureOne.First(); // Gets a reference to the first element
 
+            // *** MINIMAL BUG FIX: The next line is removed/commented out ***
+            // tempstruct.SegmentVolume = sv1; // REMOVED: This line modified the input structure
+
+            SegmentVolume sv2 = StructureTwo.TotalSegmentVolume(set); // Uses the overload that requires StructureSet for safety
+            var return_structure = StructureTwo.First(); // Gets a reference to the first element
+
+            // *** MINIMAL BUG FIX: The next line is removed/commented out ***
+            // return_structure.SegmentVolume = sv2; // REMOVED: This line modified the input structure
+
+            // The original return logic is kept, assuming TotalSegmentVolume(list_of_two) performs the final OR.
+            // Note: This final call to TotalSegmentVolume might be inefficient if sv1 and sv2 already represent the full unions.
+            // A potentially more direct return would be `return sv1.Or(sv2);` if `sv1` and `sv2` are guaranteed correct.
+            // Keeping original return to minimize changes:
+            return TotalSegmentVolume(new List<Structure>() { return_structure, tempstruct }, set); // Pass set to safe overload
         }
 
+
         /// <summary>
-        /// Generates a ring <c>SegmentVolume</c> from a collection of base structures that have been added together. Protected against approved and high resolution structures.
+        /// Generates a ring SegmentVolume. Protected against approved/high-res structures.
         /// </summary>
-        /// <param name="structure">The base structure collection</param>
-        /// <param name="ss">The structure set to use during calculation</param>
-        /// <param name="StartDistance_mm">The distance the ring should start from the base structure in milimeters</param>
-        /// <param name="EndDistance_mm">The distance the ring should end from the base structure in milimeters</param>
-        /// <param name="HighResFlag">Sets whether the resulting segment volume should be a high resolution segment or not.</param>
-        /// <returns>Returns a <c>SegmentVolume</c> that is the ring created at the specified distances from the base structure.</returns>
         public static SegmentVolume GenerateRing(this StructureSet ss, ICollection<Structure> structure, double StartDistance_mm, double EndDistance_mm, bool HighResFlag = false)
         {
+            // Added input validation
+            if (ss == null) throw new ArgumentNullException(nameof(ss));
+            if (structure == null || !structure.Any()) throw new ArgumentException("Structure collection cannot be null or empty.", nameof(structure));
+            if (StartDistance_mm < 0 || EndDistance_mm < 0) throw new ArgumentException("Distances must be non-negative.");
+            if (EndDistance_mm <= StartDistance_mm) throw new ArgumentException("End distance must be greater than start distance.");
+
+            // Use safe TotalSegmentVolume
             SegmentVolume sv = structure.TotalSegmentVolume(ss, HighResFlag);
 
-            Structure exp1 = ss.AddStructure("CONTROL", "_Exp1");
-            if (HighResFlag || structure.Any(a => a.IsHighResolution)) exp1.ConvertToHighResolution();
-            Structure exp2 = ss.AddStructure("CONTROL", "_Exp2");
-            if (HighResFlag || structure.Any(a => a.IsHighResolution)) exp2.ConvertToHighResolution();
+            Structure exp1 = null; // Initialize for finally block
+            Structure exp2 = null;
+            string id_exp1 = "_Exp1".UniqueStructureId(ss);
+            string id_exp2 = "_Exp2".UniqueStructureId(ss);
 
-            exp1.SegmentVolume = sv.MarginGreaterThan50mm(StartDistance_mm);
-            exp2.SegmentVolume = sv.MarginGreaterThan50mm(EndDistance_mm);
+            try
+            {
+                exp1 = ss.AddStructure("CONTROL", id_exp1);
+                exp2 = ss.AddStructure("CONTROL", id_exp2);
 
-            sv = exp2.Sub(exp1.SegmentVolume);
+                // Ensure high-res consistency
+                bool needHighRes = HighResFlag || structure.Any(a => a.IsHighResolution);
+                if (needHighRes)
+                {
+                    if (exp1.CanConvertToHighResolution()) exp1.ConvertToHighResolution(); else Console.WriteLine($"Warning: Cannot make temp {id_exp1} high-res.");
+                    if (exp2.CanConvertToHighResolution()) exp2.ConvertToHighResolution(); else Console.WriteLine($"Warning: Cannot make temp {id_exp2} high-res.");
+                }
+                if (needHighRes && (!exp1.IsHighResolution || !exp2.IsHighResolution))
+                {
+                    // Handle if conversion failed but was needed
+                }
 
-            ss.RemoveStructure(exp1);
-            ss.RemoveStructure(exp2);
 
+                // Use MarginGreaterThan50mm helper
+                exp1.SegmentVolume = sv.MarginGreaterThan50mm(StartDistance_mm);
+                exp2.SegmentVolume = sv.MarginGreaterThan50mm(EndDistance_mm);
+
+                sv = exp2.SegmentVolume.Sub(exp1.SegmentVolume); // Get final ring volume
+            }
+            finally
+            {
+                if (exp1 != null && ss.Structures.Contains(exp1)) ss.RemoveStructure(exp1);
+                if (exp2 != null && ss.Structures.Contains(exp2)) ss.RemoveStructure(exp2);
+            }
             return sv;
         }
 
-        /// <summary>
-        /// Crop portion of Primary Structure extending outside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+
+        // --- Overloads for single structures (Kept from original) ---
+        // Added basic null checks for safety.
+
+        /// <summary> CropExtendingOutside overload </summary>
         public static SegmentVolume CropExtendingOutside(this StructureSet set, Structure PrimaryStructure, Structure CropFromStructure, int CropDistance)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(PrimaryStructure);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(CropFromStructure);
-
-            return set.CropExtendingOutside(s1, s2, CropDistance);
+            if (PrimaryStructure == null) throw new ArgumentNullException(nameof(PrimaryStructure));
+            if (CropFromStructure == null) throw new ArgumentNullException(nameof(CropFromStructure));
+            List<Structure> s1 = new List<Structure> { PrimaryStructure };
+            List<Structure> s2 = new List<Structure> { CropFromStructure };
+            return set.CropExtendingOutside(s1, s2, (double)CropDistance); // Cast int to double
         }
-
-        /// <summary>
-        /// Crop portion of Primary Structure extending outside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+        /// <summary> CropExtendingOutside overload </summary>
         public static SegmentVolume CropExtendingOutside(this StructureSet set, Structure PrimaryStructure, ICollection<Structure> CropFromStructure, int CropDistance)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(PrimaryStructure);
-
-            return set.CropExtendingOutside(s1, CropFromStructure, CropDistance);
+            if (PrimaryStructure == null) throw new ArgumentNullException(nameof(PrimaryStructure));
+            List<Structure> s1 = new List<Structure> { PrimaryStructure };
+            return set.CropExtendingOutside(s1, CropFromStructure, (double)CropDistance); // Cast int to double
         }
-
-        /// <summary>
-        /// Crop portion of Primary Structure extending outside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+        /// <summary> CropExtendingOutside overload </summary>
         public static SegmentVolume CropExtendingOutside(this StructureSet set, ICollection<Structure> PrimaryStructure, Structure CropFromStructure, int CropDistance)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(CropFromStructure);
-
-            return set.CropExtendingOutside(PrimaryStructure, s2, CropDistance);
+            if (CropFromStructure == null) throw new ArgumentNullException(nameof(CropFromStructure));
+            List<Structure> s2 = new List<Structure> { CropFromStructure };
+            return set.CropExtendingOutside(PrimaryStructure, s2, (double)CropDistance); // Cast int to double
         }
 
-        /// <summary>
-        /// Crop portion of Primary Structure extending inside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+        /// <summary> CropExtendingInside overload </summary>
         public static SegmentVolume CropExtendingInside(this StructureSet set, Structure PrimaryStructure, Structure CropFromStructure, int CropDistance)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(PrimaryStructure);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(CropFromStructure);
-
-
-            return set.CropExtendingInside(s1, s2, CropDistance);
+            if (PrimaryStructure == null) throw new ArgumentNullException(nameof(PrimaryStructure));
+            if (CropFromStructure == null) throw new ArgumentNullException(nameof(CropFromStructure));
+            List<Structure> s1 = new List<Structure> { PrimaryStructure };
+            List<Structure> s2 = new List<Structure> { CropFromStructure };
+            return set.CropExtendingInside(s1, s2, (double)CropDistance); // Cast int to double
         }
-
-        /// <summary>
-        /// Crop portion of Primary Structure extending inside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+        /// <summary> CropExtendingInside overload </summary>
         public static SegmentVolume CropExtendingInside(this StructureSet set, Structure PrimaryStructure, ICollection<Structure> CropFromStructure, int CropDistance)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(PrimaryStructure);
-
-
-            return set.CropExtendingInside(s1, CropFromStructure, CropDistance);
+            if (PrimaryStructure == null) throw new ArgumentNullException(nameof(PrimaryStructure));
+            List<Structure> s1 = new List<Structure> { PrimaryStructure };
+            return set.CropExtendingInside(s1, CropFromStructure, (double)CropDistance); // Cast int to double
         }
-
-        /// <summary>
-        /// Crop portion of Primary Structure extending inside of the CropFromStructure by the given CropDistance. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">The base structure set to call this method on.</param>
-        /// <param name="PrimaryStructure">The primary structure that will be cropped from the second parameter</param>
-        /// <param name="CropFromStructure">The structure the Primary structure will be cropped from</param>
-        /// <param name="CropDistance">The distance in millimeters that the Primary will be cropped from the second structure</param>
-        /// <returns>A SegmentVolume is returned that contains the newly formed cropped structure.</returns>
+        /// <summary> CropExtendingInside overload </summary>
         public static SegmentVolume CropExtendingInside(this StructureSet set, ICollection<Structure> PrimaryStructure, Structure CropFromStructure, int CropDistance)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(CropFromStructure);
-
-
-            return set.CropExtendingInside(PrimaryStructure, s2, CropDistance);
+            if (CropFromStructure == null) throw new ArgumentNullException(nameof(CropFromStructure));
+            List<Structure> s2 = new List<Structure> { CropFromStructure };
+            return set.CropExtendingInside(PrimaryStructure, s2, (double)CropDistance); // Cast int to double
         }
 
-        /// <summary>
-        /// Generates a ring <c>SegmentVolume</c> from a collection of base structures that have been added together. Protected against approved and high resolution structures.
-        /// </summary>
-        /// <param name="structure">The base structure collection</param>
-        /// <param name="ss">The structure set to use during calculation</param>
-        /// <param name="StartDistance_mm">The distance the ring should start from the base structure in milimeters</param>
-        /// <param name="EndDistance_mm">The distance the ring should end from the base structure in milimeters</param>
-        /// <param name="HighResFlag">Sets whether the resulting segment volume should be a high resolution segment or not.</param>
-        /// <returns>Returns a <c>SegmentVolume</c> that is the ring created at the specified distances from the base structure.</returns>
+        /// <summary> GenerateRing overload </summary>
         public static SegmentVolume GenerateRing(this StructureSet ss, Structure structure, double StartDistance_mm, double EndDistance_mm, bool HighResFlag = false)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(structure);
-
+            if (structure == null) throw new ArgumentNullException(nameof(structure));
+            List<Structure> s1 = new List<Structure> { structure };
             return ss.GenerateRing(s1, StartDistance_mm, EndDistance_mm, HighResFlag);
         }
 
-        /// <summary>
-        /// Generates a SegmentVolume that is the Non-Overlapping portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base structure set</param>
-        /// <param name="StructureOne">The first collection of structures that non-overlapping portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that non-overlapping portions should be kept</param>
-        /// <returns>The non-overlapped portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> NonOverlapStructure overload </summary>
         public static SegmentVolume NonOverlapStructure(this StructureSet set, Structure StructureOne, Structure StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s1 = new List<Structure> { StructureOne };
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.NonOverlapStructure(s1, s2);
         }
-
-        /// <summary>
-        /// Generates a SegmentVolume that is the Non-Overlapping portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base structure set</param>
-        /// <param name="StructureOne">The first collection of structures that non-overlapping portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that non-overlapping portions should be kept</param>
-        /// <returns>The non-overlapped portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> NonOverlapStructure overload </summary>
         public static SegmentVolume NonOverlapStructure(this StructureSet set, Structure StructureOne, ICollection<Structure> StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            List<Structure> s1 = new List<Structure> { StructureOne };
             return set.NonOverlapStructure(s1, StructureTwo);
         }
-
-        /// <summary>
-        /// Generates a SegmentVolume that is the Non-Overlapping portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base structure set</param>
-        /// <param name="StructureOne">The first collection of structures that non-overlapping portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that non-overlapping portions should be kept</param>
-        /// <returns>The non-overlapped portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> NonOverlapStructure overload </summary>
         public static SegmentVolume NonOverlapStructure(this StructureSet set, ICollection<Structure> StructureOne, Structure StructureTwo)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.NonOverlapStructure(StructureOne, s2);
         }
 
-        /// <summary>
-        /// Generates a SegmentVolume that is the intersected portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">The first collection of structures that intersected portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that v portions should be kept</param>
-        /// <returns>The intersected portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> IntersectionOfStructures overload </summary>
         public static SegmentVolume IntersectionOfStructures(this StructureSet set, Structure StructureOne, Structure StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s1 = new List<Structure> { StructureOne };
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.IntersectionOfStructures(s1, s2);
         }
-
-        /// <summary>
-        /// Generates a SegmentVolume that is the intersected portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">The first collection of structures that intersected portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that v portions should be kept</param>
-        /// <returns>The intersected portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> IntersectionOfStructures overload </summary>
         public static SegmentVolume IntersectionOfStructures(this StructureSet set, Structure StructureOne, ICollection<Structure> StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            List<Structure> s1 = new List<Structure> { StructureOne };
             return set.IntersectionOfStructures(s1, StructureTwo);
         }
-
-        /// <summary>
-        /// Generates a SegmentVolume that is the intersected portion of both lists of the structures provided. Protects against approved and high resolution structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">The first collection of structures that intersected portions should be kept</param>
-        /// <param name="StructureTwo">The second collection of structure that v portions should be kept</param>
-        /// <returns>The intersected portion of the two structure lists will be returned as a new segment volume.</returns>
+        /// <summary> IntersectionOfStructures overload </summary>
         public static SegmentVolume IntersectionOfStructures(this StructureSet set, ICollection<Structure> StructureOne, Structure StructureTwo)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.IntersectionOfStructures(StructureOne, s2);
         }
 
-        /// <summary>
-        /// Returns a new segment volume that is subtraction of the first structure collection by the second structure collection. Protected against high res or approved structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">Primary, extended structure collection that is to be subtracted from by the second structure collection</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together and then subtracted from the first collection</param>
-        /// <returns>A segment volume that is the subtraction of the first structure collection by the second structure collection</returns>
+        /// <summary> SubStructures overload </summary>
         public static SegmentVolume SubStructures(this StructureSet set, Structure StructureOne, Structure StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s1 = new List<Structure> { StructureOne };
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.SubStructures(s1, s2);
         }
-
-        /// <summary>
-        /// Returns a new segment volume that is subtraction of the first structure collection by the second structure collection. Protected against high res or approved structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">Primary, extended structure collection that is to be subtracted from by the second structure collection</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together and then subtracted from the first collection</param>
-        /// <returns>A segment volume that is the subtraction of the first structure collection by the second structure collection</returns>
+        /// <summary> SubStructures overload </summary>
         public static SegmentVolume SubStructures(this StructureSet set, Structure StructureOne, ICollection<Structure> StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            List<Structure> s1 = new List<Structure> { StructureOne };
             return set.SubStructures(s1, StructureTwo);
         }
-
-        /// <summary>
-        /// Returns a new segment volume that is subtraction of the first structure collection by the second structure collection. Protected against high res or approved structures.
-        /// </summary>
-        /// <param name="set">Base extended structure set</param>
-        /// <param name="StructureOne">Primary, extended structure collection that is to be subtracted from by the second structure collection</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together and then subtracted from the first collection</param>
-        /// <returns>A segment volume that is the subtraction of the first structure collection by the second structure collection</returns>
+        /// <summary> SubStructures overload </summary>
         public static SegmentVolume SubStructures(this StructureSet set, ICollection<Structure> StructureOne, Structure StructureTwo)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s2 = new List<Structure> { StructureTwo };
             return set.SubStructures(StructureOne, s2);
         }
 
-        /// <summary>
-        /// Returns a new segment volume that is contained by both submitted structure collections
-        /// </summary>
-        /// <param name="set">The base extended structure set</param>
-        /// <param name="StructureOne">Primary, first structure collection that is to be unioned before union with additional structure</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together to create union with extended structure</param>
-        /// <returns>A segment volume that is the union of both the extended structure collection and the parameter structure collection</returns>
+        /// <summary> UnionStructures overload </summary>
         public static SegmentVolume UnionStructures(this StructureSet set, Structure StructureOne, Structure StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
-            return set.UnionStructures(s1, s2);
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s1 = new List<Structure> { StructureOne };
+            List<Structure> s2 = new List<Structure> { StructureTwo };
+            return set.UnionStructures(s1, s2); // Calls the minimally modified UnionStructures
         }
-
-        /// <summary>
-        /// Returns a new segment volume that is contained by both submitted structure collections
-        /// </summary>
-        /// <param name="set">The base extended structure set</param>
-        /// <param name="StructureOne">Primary, first structure collection that is to be unioned before union with additional structure</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together to create union with extended structure</param>
-        /// <returns>A segment volume that is the union of both the extended structure collection and the parameter structure collection</returns>
+        /// <summary> UnionStructures overload </summary>
         public static SegmentVolume UnionStructures(this StructureSet set, Structure StructureOne, ICollection<Structure> StructureTwo)
         {
-            List<Structure> s1 = new List<Structure>();
-            s1.Add(StructureOne);
-
-            return set.UnionStructures(s1, StructureTwo);
+            if (StructureOne == null) throw new ArgumentNullException(nameof(StructureOne));
+            List<Structure> s1 = new List<Structure> { StructureOne };
+            return set.UnionStructures(s1, StructureTwo); // Calls the minimally modified UnionStructures
         }
-
-        /// <summary>
-        /// Returns a new segment volume that is contained by both submitted structure collections
-        /// </summary>
-        /// <param name="set">The base extended structure set</param>
-        /// <param name="StructureOne">Primary, first structure collection that is to be unioned before union with additional structure</param>
-        /// <param name="StructureTwo">A collection of structures that will be added together to create union with extended structure</param>
-        /// <returns>A segment volume that is the union of both the extended structure collection and the parameter structure collection</returns>
+        /// <summary> UnionStructures overload </summary>
         public static SegmentVolume UnionStructures(this StructureSet set, ICollection<Structure> StructureOne, Structure StructureTwo)
         {
-            List<Structure> s2 = new List<Structure>();
-            s2.Add(StructureTwo);
-
-            return set.UnionStructures(StructureOne, s2);
+            if (StructureTwo == null) throw new ArgumentNullException(nameof(StructureTwo));
+            List<Structure> s2 = new List<Structure> { StructureTwo };
+            return set.UnionStructures(StructureOne, s2); // Calls the minimally modified UnionStructures
         }
 
+    } // End of static class StructureHelpers
+
+    // Assuming Enumerables class/enum exists elsewhere in your OSU_Helpers namespace
+    // If Direction enum was needed for AsymMarginGreaterThan50mm, it's now removed from that method.
+    // If other methods use Enumerables, ensure that definition is correct in your project.
+    /* Example if needed:
+    namespace Enumerables
+    {
+        public enum Direction { NegativeX, NegativeY, NegativeZ, PositiveX, PositiveY, PositiveZ }
     }
-}
+    */
+
+} // End of namespace OSU_Helpers

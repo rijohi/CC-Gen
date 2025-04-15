@@ -225,7 +225,8 @@ namespace OSUStructureGenerator
                     }
                     else
                     {
-                        sv = sv.AsymMarginGreaterThan50mm(margins, margingeometry);
+                        double[] doubleMargins = Array.ConvertAll(margins, item => (double)item);
+                        sv = sv.AsymMarginGreaterThan50mm(doubleMargins, margingeometry);
                     }
 
                     GeneratedStructure.SegmentVolume = sv;
@@ -317,7 +318,7 @@ namespace OSUStructureGenerator
                     }
 
                     if (CheckForBaseStructureExistence())
-                        throw new ArgumentException("The base structure id ("+ id + ") appended with a number already exists in the structure set. Please remove or rename before continuing:\r\n" + line);
+                        throw new ArgumentException("The base structure id (" + id + ") appended with a number already exists in the structure set. Please remove or rename before continuing:\r\n" + line);
 
 
                     List<Structure> structures = new List<Structure>();
@@ -370,7 +371,7 @@ namespace OSUStructureGenerator
                 possible_ids.Add((id + i.ToString()));
             }
 
-            foreach(string s in BaseStructureSet.Structures.Select(a => a.Id))
+            foreach (string s in BaseStructureSet.Structures.Select(a => a.Id))
             {
                 if (possible_ids.Contains(s))
                     return true;

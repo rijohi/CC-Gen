@@ -67,3 +67,9 @@ Valid operators, the arguments allowed, and their actions are:
   <li>PTV, PTV = Body.List(GTV,Starts).HighRes().Margin(3)</li>
 </ul>
 <b>Note:</b> The structure ID “PTV” will be iterated over and make structures “PTV1”, “PTV2”, “PTV3”, etc. Each of those structures will have the DICOM type PTV applied. It is currently NOT possible to create structures with different DICOM types.
+
+## Recent Changes / Fixes in Fork (rijohi/CC-Gen)
+
+* **[rijohi]**
+    * Fixed a bug in `OSU_Helpers.StructureHelpers.UnionStructures` where the operation unintentionally modified input structures.
+    * Corrected type mismatches (`int`/`double`, `int[]`/`double[]`) in `OSUStructureGenerator.StructureGenerationFromText` when calling updated `OSU_Helpers` methods (e.g., `GenerateRing`, `Crop...`, `Margin...`, `AsymMargin...`).
